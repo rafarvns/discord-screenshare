@@ -41,6 +41,9 @@ const abas = new Set();
 let sdk = null;
 let session = null;
 let clientId = null;
+// Servidor em modo restrito, visto de fora do Discord: não há lobby nem login,
+// só a sala de um link gerado pela própria atividade.
+let restritoWeb = false;
 let ws = null;
 let participants = [];
 let reconnectDelay = 1000;
@@ -1170,8 +1173,10 @@ async function boot() {
   const config = loadConfig();
 
   // Sem login o lobby ainda abre: dá para ver as salas antes de entrar. Só
-  // criar e entrar é que pedem identidade.
-  session = inDiscord ? await authDiscord(config) : await authWeb();
+  // criar e entrar é que pedem identidade. No modo restrito, fora do Discord,
+  // nem isso: nenhuma identidade é pedida ao servidor.
+  restritoWeb = !inDiscord && Boolean((await config).restrito);
+  session = inDiscord ? await authDiscord(config) : restritoWeb ? null : await authWeb();
 
   clientId = params.get('client_id') || (await config).clientId || null;
   checkVersion((await config).asset);
@@ -1189,6 +1194,8 @@ async function boot() {
   const alvo = new URLSearchParams(location.search).get('sala');
   // Do ?t= não: ele é lido do params do arranque, capturado antes de tudo.
   const ingresso = params.get('t');
+
+  if (restritoWeb) return ingresso ? abrirPeloIngresso(ingresso) : showLobby();
 
   await showLobby();
   if (ingresso) return abrirPeloIngresso(ingresso);
@@ -1399,6 +1406,20 @@ async function showLobby() {
   // que melhorar.
   $('loginBtn').hidden = inDiscord || !session?.isGuest;
   $('people').hidden = true;
+
+  // Modo restrito: no lugar do lobby, só o aviso. Vale também para quem sai
+  // da sala aberta por link, ou quando ela fecha.
+  if (restritoWeb) {
+    $('lobby').hidden = true;
+    $('empty').hidden = false;
+    clearInterval(lobbyTimer);
+    lobbyTimer = null;
+    setEmpty(
+      'Acesso restrito',
+      'Esta atividade é só para membros do servidor. Abra pela Activity, num canal de voz do Discord.',
+    );
+    return;
+  }
 
   await loadRooms();
 
@@ -1784,7 +1805,8 @@ function connect() {
     // O apelido é do cliente, então precisa ser reenviado a cada conexão —
     // inclusive nas reconexões, senão o nome volta ao do Discord sozinho.
     const saved = storedName();
-    if (saved && saved !== session.user.name) {
+    // Sem sessão no modo restrito: quem chega pelo link da atividade só assiste.
+    if (session && saved && saved !== session.user.name) {
       session.user.name = saved;
       ws.send(JSON.stringify({ type: 'rename', name: saved }));
     }

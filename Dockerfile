@@ -43,6 +43,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY server/ server/
 COPY shared/ shared/
+# O servidor importa scripts/diagnostics.mjs; sem esta pasta ele nem sobe.
+COPY scripts/ scripts/
 COPY --from=build /app/client/dist client/dist
 
 # Usuário sem privilégio, já existente na imagem oficial.

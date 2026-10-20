@@ -25,6 +25,7 @@ for (const chave of [
   'DISCORD_CLIENT_SECRET',
   'DISCORD_BOT_TOKEN',
   'DISCORD_ADMIN_ID',
+  'DISCORD_GUILD_ID',
   'PUBLIC_ORIGIN',
 ]) {
   process.env[chave] = '';

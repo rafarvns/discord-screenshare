@@ -28,6 +28,7 @@ const {
   DISCORD_CLIENT_SECRET,
   DISCORD_BOT_TOKEN,
   DISCORD_ADMIN_ID = '',
+  DISCORD_GUILD_ID = '',
   PUBLIC_ORIGIN: ORIGEM_CRUA = 'http://localhost:3001',
   PORT = 3001,
   NODE_ENV = 'development',
@@ -41,6 +42,18 @@ const PUBLIC_ORIGIN = ORIGEM_CRUA.replace(/[/]+$/, '');
 const isProd = NODE_ENV === 'production';
 const ADMIN_ID = String(DISCORD_ADMIN_ID).trim();
 const ADMIN_COOKIE = 'discord_screen_admin';
+
+// Modo restrito: só membros destes servidores usam a atividade. Vazio, tudo
+// segue aberto como antes — inclusive o site com convidados.
+const GUILDS_PERMITIDAS = new Set(
+  String(DISCORD_GUILD_ID)
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean),
+);
+const restrito = GUILDS_PERMITIDAS.size > 0;
+const guildPermitida = (id) => !restrito || (id != null && GUILDS_PERMITIDAS.has(String(id)));
+
 const terminalDetalhado = /^(0|false|off|desligado|nao|não)$/i.test(
   String(process.env.TERMINAL_LIMPO ?? ''),
 );
@@ -73,6 +86,29 @@ if (ADMIN_ID && process.env.SESSION_SECRET.length < 32) {
 if (ADMIN_ID && !/^[0-9]{15,21}$/.test(ADMIN_ID)) {
   console.error('ERRO: DISCORD_ADMIN_ID invalido. Use o ID numerico da sua conta Discord.');
   process.exit(1);
+}
+
+// O servidor permitido vai assinado no token, e é ele que abre as salas. Com o
+// segredo padrão, que é público, qualquer um forjaria esse campo.
+if (restrito && !process.env.SESSION_SECRET) {
+  console.error('ERRO: SESSION_SECRET obrigatorio quando DISCORD_GUILD_ID esta definido.');
+  process.exit(1);
+}
+
+if (restrito && [...GUILDS_PERMITIDAS].some((id) => !/^[0-9]{15,21}$/.test(id))) {
+  console.error(
+    'ERRO: DISCORD_GUILD_ID invalido. Use o ID numerico do servidor (ou varios, separados por virgula).',
+  );
+  process.exit(1);
+}
+
+// Sem bot não há como confirmar quem é membro, e o modo restrito falha
+// fechado: ninguém entra. Melhor avisar agora do que no primeiro "não entra".
+if (restrito && !DISCORD_BOT_TOKEN) {
+  console.warn(
+    'AVISO: DISCORD_GUILD_ID sem DISCORD_BOT_TOKEN — ninguem consegue entrar. ' +
+      'Configure o token de um bot que esteja no servidor.',
+  );
 }
 
 const nativeAudioAuthorizer = createNativeAudioAuthorizer({ verifyToken });
@@ -259,6 +295,26 @@ app.post('/api/session', async (req, res) => {
 
     const guildId = /^[0-9]{15,21}$/.test(String(guild_id ?? '')) ? String(guild_id) : null;
     const channelId = /^[0-9]{15,21}$/.test(String(channel_id ?? '')) ? String(channel_id) : null;
+
+    // O guild_id vem do cliente, então só vale depois que o Discord confirma,
+    // pelo bot, que a pessoa é membro dele. Na dúvida, ninguém entra.
+    if (restrito) {
+      if (!guildPermitida(guildId)) {
+        return res
+          .status(403)
+          .json({ error: 'Esta atividade é exclusiva de um servidor específico.' });
+      }
+      const membro = await ehMembro(guildId, me.id);
+      if (membro === 'nao') {
+        return res.status(403).json({ error: 'Esta atividade é só para membros do servidor.' });
+      }
+      if (membro !== 'sim') {
+        return res
+          .status(503)
+          .json({ error: 'Não deu para confirmar que você é membro do servidor. Tente de novo.' });
+      }
+    }
+
     const [presenca, guildName] = await Promise.all([
       inVoiceChannel(guildId, channelId, me.id),
       resolveGuildName(guildId),
@@ -313,7 +369,7 @@ app.post('/api/session', async (req, res) => {
  * escolher a instância permitiria espiar as salas de qualquer canal de voz.
  */
 app.post('/api/session-dev', (req, res) => {
-  if (isProd) return res.status(404).end();
+  if (isProd || restrito) return res.status(404).end();
   const { instance_id = 'dev', name = 'Dev', call = null } = req.body ?? {};
   res.json(
     issueIdentity(instance_id, `dev-${name}`, name, null, 8 * 60 * 60, call ? { call } : {}),
@@ -321,6 +377,7 @@ app.post('/api/session-dev', (req, res) => {
 });
 
 app.post('/api/session-guest', (req, res) => {
+  if (restrito) return res.status(404).end();
   const raw = String(req.body?.name ?? '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -372,6 +429,41 @@ async function resolveGuildName(guildId) {
     expiresAt: Date.now() + (name ? 60 * 60 * 1000 : 10 * 60 * 1000),
   });
   return name;
+}
+
+/**
+ * Confirma pelo Discord, com o token do bot, que a pessoa é membro do servidor.
+ *
+ * A busca de um membro só pela API REST não pede o intent privilegiado de
+ * membros: basta o bot estar no servidor.
+ *
+ * @returns {'sim'|'nao'|'indisponivel'}
+ */
+async function ehMembro(guildId, userId) {
+  if (!DISCORD_BOT_TOKEN || !guildId) return 'indisponivel';
+
+  try {
+    const r = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}`, {
+      headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (r.ok) return 'sim';
+    if (r.status === 404) {
+      // 10004 é o bot fora do servidor — falta de visibilidade nossa, não
+      // resposta sobre a pessoa. 10007 é "Unknown Member": essa sim é um não.
+      const erro = await r.json().catch(() => ({}));
+      if (erro?.code === 10004) {
+        console.warn('[membro] o bot nao esta no servidor permitido — ninguem entra');
+        return 'indisponivel';
+      }
+      return 'nao';
+    }
+    warnDev(`[membro] Discord respondeu ${r.status}`);
+    return 'indisponivel';
+  } catch (err) {
+    warnDev('[membro] falhou:', err.message);
+    return 'indisponivel';
+  }
 }
 
 /**
@@ -486,6 +578,10 @@ function identityOf(req, res) {
     res.status(401).json({ error: 'identidade invalida ou expirada' });
     return null;
   }
+  if (!guildPermitida(payload.guild)) {
+    res.status(403).json({ error: 'Esta atividade é só para membros do servidor.' });
+    return null;
+  }
   return payload;
 }
 
@@ -523,7 +619,9 @@ function issueRoomTokens(roomId, me) {
  */
 app.post('/api/rooms/list', (req, res) => {
   const me = verifyToken(req.body?.identity);
-  const instance = me?.scope === 'identity' ? me.instance : WEB_INSTANCE;
+  const valida = me?.scope === 'identity';
+  if (restrito && !(valida && guildPermitida(me.guild))) return res.json({ rooms: [] });
+  const instance = valida ? me.instance : WEB_INSTANCE;
   res.json({ rooms: R.listRooms(instance) });
 });
 
@@ -624,6 +722,9 @@ app.post('/api/rooms/open', (req, res) => {
   if (!ingresso?.room || ingresso.role !== 'viewer') {
     return res.status(401).json({ error: 'Link inválido ou expirado.' });
   }
+  if (!guildPermitida(ingresso.guild)) {
+    return res.status(403).json({ error: 'Esta atividade é só para membros do servidor.' });
+  }
 
   const room = R.getRoom(ingresso.room);
   if (!room) return res.status(404).json({ error: 'Sala não existe mais.' });
@@ -664,6 +765,7 @@ function discordAuthorizeUrl(state = null) {
 }
 
 app.get('/auth/login', (_req, res) => {
+  if (restrito) return res.redirect('/?erro=restrito');
   const url = discordAuthorizeUrl();
   res.redirect(url.toString());
 });
@@ -685,6 +787,9 @@ app.get('/auth/callback', async (req, res) => {
   const { code, state } = req.query;
   const oauthState = verifyToken(typeof state === 'string' ? state : '');
   const adminFlow = oauthState?.scope === 'oauth-state' && oauthState.target === 'admin';
+  // No modo restrito o site não emite identidade: só a atividade, dentro do
+  // servidor, prova que a pessoa é membro. O login do painel segue igual.
+  if (restrito && !adminFlow) return res.redirect('/?erro=restrito');
   if (!code) return res.redirect(adminFlow ? '/admin?error=sem_codigo' : '/?erro=sem_codigo');
 
   try {
@@ -846,7 +951,7 @@ app.get('/api/config', (_req, res) => {
 
   // || e nao ??: uma variavel vazia no .env chega como string vazia, e o
   // contrato aqui e "null significa nao configurado".
-  res.json({ clientId: DISCORD_CLIENT_ID || null, asset, nativeAudioLocalUrl });
+  res.json({ clientId: DISCORD_CLIENT_ID || null, asset, nativeAudioLocalUrl, restrito });
 });
 
 // Activity buildada (produção). Em dev o Vite serve o client na 5173.
@@ -892,6 +997,13 @@ server.on('upgrade', (req, socket, head) => {
   // scope 'identity' não dá acesso a sala nenhuma: só os tokens de sala servem.
   if (!payload || !payload.room) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  // Última barreira: derruba também tokens de sala antigos, emitidos antes do
+  // modo restrito para convidados do site.
+  if (!guildPermitida(payload.guild)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
     socket.destroy();
     return;
   }

@@ -49,6 +49,16 @@ O Discord não permite que um programa crie a aplicação e autorize campos sens
 
 O botão azul **Redirecionamento/Add Redirect** deve criar uma caixa na mesma página. Se ele abrir uma tela cheia de código com `removeChild`, siga o [contorno seguro para o erro do Developer Portal](docs/discord-portal.md); não é necessário refazer URL Mapping nem executar comandos no console.
 
+### Só para membros do seu servidor
+
+Preencha `DISCORD_GUILD_ID` no `.env` (botão direito no ícone do servidor, **Copiar ID**; vários separados por vírgula). Com ele:
+
+- A Activity só abre para quem o bot confirma que é membro. Por isso exige `DISCORD_BOT_TOKEN`, com o bot dentro do servidor. Se o Discord não responder, ninguém entra.
+- O site fora do Discord não abre mais lobby nem convidado. Continuam valendo só os links gerados dentro da Activity: a página de transmissão e o "abrir no site".
+- O login do painel `/admin` segue igual.
+
+No portal, em **Installation**, deixe só **Guild Install** e desmarque **Public Bot** para que estranhos nem consigam adicionar a aplicação.
+
 O Client Secret fica somente no servidor local e o `.gitignore` exclui `.env`. Nunca publique `.env`, tokens ou credenciais da pasta `.cloudflared`.
 
 ## Compartilhamento e compatibilidade

@@ -131,6 +131,27 @@ const DISCORD_BOT_TOKEN = await perguntar('Token do bot (opcional)', {
       : 'Curto demais para um token de bot; isso parece o Client Secret. Cole o token ou aperte Enter para pular.',
 });
 
+// Só faz sentido com o bot: é ele quem confirma quem é membro. Sem token, a
+// chave fica como estava — apagar aqui destrancaria a atividade em silêncio.
+let DISCORD_GUILD_ID = atual.DISCORD_GUILD_ID ?? '';
+if (DISCORD_BOT_TOKEN) {
+  linha();
+  nota('  Opcional: o ID do seu servidor. Preenchido, só membros dele usam a');
+  nota('  atividade, e o site fora do Discord deixa de abrir salas para qualquer um.');
+  nota('  O bot precisa estar nesse servidor. No Discord, com o Modo desenvolvedor');
+  nota('  ligado: botão direito no ícone do servidor, "Copiar ID do servidor".');
+  nota('  Vários servidores: separe por vírgula. Enter vazio = aberto para todos.');
+  linha();
+
+  DISCORD_GUILD_ID = await perguntar('ID do servidor (opcional)', {
+    padrao: DISCORD_GUILD_ID,
+    valida: (v) =>
+      !v || v.split(',').every((id) => /^[0-9]{15,21}$/.test(id.trim()))
+        ? null
+        : 'O ID do servidor é só números (uns 19). Confira e cole de novo.',
+  });
+}
+
 titulo('  Passo 2 de 3 · Endereço público');
 linha();
 nota('  O Discord precisa alcançar o programa que roda no seu computador,');
@@ -175,6 +196,7 @@ gravarEnv({
   DISCORD_CLIENT_ID,
   DISCORD_CLIENT_SECRET,
   DISCORD_BOT_TOKEN,
+  DISCORD_GUILD_ID: DISCORD_GUILD_ID.replace(/\s+/g, ''),
   PUBLIC_ORIGIN: origem,
 });
 
